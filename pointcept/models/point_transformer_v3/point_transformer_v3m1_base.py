@@ -247,6 +247,35 @@ class MLP(nn.Module):
         x = self.drop(x)
         return x
 
+class simpleBlock(PointModule):
+    def __init__(
+        self,
+        channels,
+        norm_layer=nn.LayerNorm,
+        mlp_ratio=4.0,
+        act_layer=nn.GELU,
+        pre_norm=True,
+    ):
+        super().__init__()
+        self.pre_norm = pre_norm
+        self.channels = channels
+        self.norm = PointSequential(norm_layer(channels))
+        self.mlp = PointSequential(
+            MLP(
+                in_channels=channels,
+                hidden_channels=int(channels * mlp_ratio),
+                out_channels=channels,
+                act_layer=act_layer,
+            )
+        )
+
+    def forward(self, point: Point):
+        shortcut = point.feat
+        point = self.norm(point)
+        point = self.mlp(point)
+        point.feat = shortcut + point.feat
+        return point
+
 
 class Block(PointModule):
     def __init__(
