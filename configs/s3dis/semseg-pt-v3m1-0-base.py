@@ -1,7 +1,7 @@
 _base_ = ["../_base_/default_runtime.py"]
 
 # misc custom setting
-batch_size = 12  # bs: total bs in all gpus
+batch_size = 4  # bs: total bs in all gpus
 num_worker = 24
 mix_prob = 0.8
 empty_cache = False
@@ -52,7 +52,7 @@ model = dict(
 )
 
 # scheduler settings
-epoch = 3000
+epoch = 500
 optimizer = dict(type="AdamW", lr=0.006, weight_decay=0.05)
 scheduler = dict(
     type="OneCycleLR",
