@@ -50,7 +50,8 @@ class TesterBase:
         self.verbose = verbose
         if self.verbose:
             self.logger.info(f"Save path: {cfg.save_path}")
-            self.logger.info(f"Config:\n{cfg.pretty_text}")
+            #self.logger.info(f"Config:\n{cfg.pretty_text}")
+            self.logger.info("Config loaded.")
         if model is None:
             self.logger.info("=> Building model ...")
             self.model = self.build_model()

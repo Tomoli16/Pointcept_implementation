@@ -14,6 +14,7 @@ from pointcept.engines.train import TRAINERS
 from pointcept.engines.launch import launch
 
 
+
 def main_worker(cfg):
     cfg = default_setup(cfg)
     trainer = TRAINERS.build(dict(type=cfg.train.type, cfg=cfg))

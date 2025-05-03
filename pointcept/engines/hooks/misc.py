@@ -45,6 +45,8 @@ class IterationTimer(HookBase):
 
     def before_epoch(self):
         self._iter_timer.reset()
+        self._epoch_start_time = time.time()  # Startzeit für diese Epoche setzen
+
 
     def before_step(self):
         data_time = self._iter_timer.seconds()
@@ -61,12 +63,12 @@ class IterationTimer(HookBase):
         remain_time = "{:02d}:{:02d}:{:02d}".format(int(t_h), int(t_m), int(t_s))
         if "iter_info" in self.trainer.comm_info.keys():
             info = (
-                "Data {data_time_val:.3f} ({data_time_avg:.3f}) "
-                "Batch {batch_time_val:.3f} ({batch_time_avg:.3f}) "
+                "Data {data_time_val:.3f} ({data_time_avg:.3f}) "   # Wie lange dauert das Laden der Daten
+                "Batch {batch_time_val:.3f} ({batch_time_avg:.3f}) "    # Wie lange dauert ein Batch
                 "Remain {remain_time} ".format(
                     data_time_val=self.trainer.storage.history("data_time").val,
                     data_time_avg=self.trainer.storage.history("data_time").avg,
-                    batch_time_val=self.trainer.storage.history("batch_time").val,
+                    batch_time_val=self.trainer.storage.history("batch_time").val,  
                     batch_time_avg=self.trainer.storage.history("batch_time").avg,
                     remain_time=remain_time,
                 )
@@ -76,12 +78,30 @@ class IterationTimer(HookBase):
             self.trainer.storage.history("data_time").reset()
             self.trainer.storage.history("batch_time").reset()
 
+    def after_epoch(self):
+        epoch_duration = time.time() - self._epoch_start_time
+        self.trainer.logger.info(f"Epoch {self.trainer.epoch + 1} time: {epoch_duration:.2f} seconds")
+
+        # optional: logge in storage (damit Tensorboard + wandb zugreifen können)
+        self.trainer.storage.put_scalar("epoch_time", epoch_duration)
+
+        if self.trainer.writer is not None:
+            self.trainer.writer.add_scalar("train/epoch_time", epoch_duration, self.trainer.epoch + 1)
+
+        if self.trainer.cfg.enable_wandb:
+            wandb.log({
+                "Epoch": self.trainer.epoch + 1,
+                "train/epoch_time": epoch_duration
+            })
+
 
 @HOOKS.register_module()
 class InformationWriter(HookBase):
     def __init__(self):
         self.curr_iter = 0
         self.model_output_keys = []
+
+
 
     def before_train(self):
         self.trainer.comm_info["iter_info"] = ""
@@ -90,10 +110,11 @@ class InformationWriter(HookBase):
             wandb.define_metric("params/*", step_metric="Iter")
             wandb.define_metric("train_batch/*", step_metric="Iter")
             wandb.define_metric("train/*", step_metric="Epoch")
+            wandb.define_metric("train/epoch_time", step_metric="Epoch")
 
     def before_step(self):
         self.curr_iter += 1
-        info = "Train: [{epoch}/{max_epoch}][{iter}/{max_iter}] ".format(
+        info = "Train: [{epoch}/{max_epoch}][{iter}/{max_iter}] ".format(   # Hier findet logging statt
             epoch=self.trainer.epoch + 1,
             max_epoch=self.trainer.max_epoch,
             iter=self.trainer.comm_info["iter"] + 1,
@@ -145,6 +166,7 @@ class InformationWriter(HookBase):
                 key=key, value=self.trainer.storage.history(key).avg
             )
         self.trainer.logger.info(epoch_info)
+
         if self.trainer.writer is not None:
             for key in self.model_output_keys:
                 self.trainer.writer.add_scalar(

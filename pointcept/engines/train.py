@@ -33,6 +33,10 @@ from pointcept.utils.scheduler import build_scheduler
 from pointcept.utils.events import EventStorage, ExceptionWriter
 from pointcept.utils.registry import Registry
 
+import time
+
+
+
 
 TRAINERS = Registry("trainers")
 AMP_DTYPE = dict(
@@ -70,6 +74,7 @@ class TrainerBase:
             # => before train
             self.before_train()
             for self.epoch in range(self.start_epoch, self.max_epoch):
+
                 # => before epoch
                 self.before_epoch()
                 # => run_epoch
@@ -292,6 +297,10 @@ class Trainer(TrainerBase):
             drop_last=len(train_data) > self.cfg.batch_size,
             persistent_workers=True,
         )
+        print("Dataset size:", len(train_data))
+        print("Batch size:", self.cfg.batch_size_per_gpu)
+        print("Drop last:", len(train_data) > self.cfg.batch_size)
+        print("Loader size (num batches):", len(train_loader))
         return train_loader
 
     def build_val_loader(self):

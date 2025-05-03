@@ -66,7 +66,15 @@ class DefaultDataset(Dataset):
             self.aug_transform = [Compose(aug) for aug in self.test_cfg.aug_transform]
 
         self.data_list = self.get_data_list()
+
         logger = get_root_logger()
+        logger.info("========== DEBUG: Dataset Info ==========")
+        logger.info(f"Split: {self.split}")
+        logger.info(f"Data list length (raw samples): {len(self.data_list)}")
+        logger.info(f"Loop multiplier: {self.loop}")
+        logger.info(f"Effective dataset length (__len__): {len(self)}")
+        logger.info("==========================================")
+
         logger.info(
             "Totally {} x {} samples in {} {} set.".format(
                 len(self.data_list), self.loop, os.path.basename(self.data_root), split

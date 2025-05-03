@@ -275,6 +275,41 @@ class simpleBlock(PointModule):
         point = self.mlp(point)
         point.feat = shortcut + point.feat
         return point
+    
+class simpleBlockConv(PointModule):
+    def __init__(
+        self,
+        channels,
+        norm_layer=nn.LayerNorm,
+        mlp_ratio=4.0,
+        act_layer=nn.GELU,
+        pre_norm=True,
+    ):
+        super().__init__()
+        self.pre_norm = pre_norm
+        self.channels = channels
+        self.norm = PointSequential(norm_layer(channels))
+        self.conv = PointSequential(
+            spconv.SubMConv3d(
+                channels,
+                channels,
+                kernel_size=3,
+                padding=1,
+                bias=False,
+                indice_key="simple_block"
+            )
+        )
+
+        self.act = PointSequential(act_layer())
+
+    def forward(self, point: Point):
+        shortcut = point.feat
+        point = self.norm(point)
+        point = self.conv(point)
+        point = self.act(point)
+        point.feat = shortcut + point.feat
+        return point
+
 
 
 class Block(PointModule):
@@ -549,16 +584,16 @@ class PointTransformerV3(PointModule):
     def __init__(
         self,
         in_channels=6,
-        order=("z", "z-trans"),
+        order=("z", "z-trans", "hilbert", "hilbert-trans"),
         stride=(2, 2, 2, 2),
         enc_depths=(2, 2, 2, 6, 2),
         enc_channels=(32, 64, 128, 256, 512),
         enc_num_head=(2, 4, 8, 16, 32),
-        enc_patch_size=(48, 48, 48, 48, 48),
+        enc_patch_size=(1024, 1024, 1024, 1024, 1024),
         dec_depths=(2, 2, 2, 2),
         dec_channels=(64, 64, 128, 256),
         dec_num_head=(4, 4, 8, 16),
-        dec_patch_size=(48, 48, 48, 48),
+        dec_patch_size=(1024, 1024, 1024, 1024),
         mlp_ratio=4,
         qkv_bias=True,
         qk_scale=None,
@@ -590,10 +625,10 @@ class PointTransformerV3(PointModule):
         assert self.num_stages == len(enc_channels)
         assert self.num_stages == len(enc_num_head)
         assert self.num_stages == len(enc_patch_size)
-        assert self.cls_mode or self.num_stages == len(dec_depths) + 1
-        assert self.cls_mode or self.num_stages == len(dec_channels) + 1
-        assert self.cls_mode or self.num_stages == len(dec_num_head) + 1
-        assert self.cls_mode or self.num_stages == len(dec_patch_size) + 1
+        assert self.cls_mode or self.num_stages == len(dec_depths) +1
+        assert self.cls_mode or self.num_stages == len(dec_channels) +1
+        assert self.cls_mode or self.num_stages == len(dec_num_head) +1
+        assert self.cls_mode or self.num_stages == len(dec_patch_size) +1
 
         # norm layers
         if pdnorm_bn:
