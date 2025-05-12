@@ -58,6 +58,9 @@ class Point(Dict):
         """
         self["order"] = order
         assert "batch" in self.keys()
+        # "voxelisiert" die Punkte, jeder Punkt bekommt Voxel-ID
+        # Kleinster Punkt wird auf 0,0,0 gesetzt
+        # Alle Punkte befinden sich innerhalb des Gitters
         if "grid_coord" not in self.keys():
             # if you don't want to operate GridSampling in data augmentation,
             # please add the following augmentation into your pipline:
@@ -69,12 +72,18 @@ class Point(Dict):
                 self.coord - self.coord.min(0)[0], self.grid_size, rounding_mode="trunc"
             ).int()
 
+        
         if depth is None:
             # Adaptive measure the depth of serialization cube (length = 2 ^ depth)
+            # Wie viele Bits sind nötig um die größte Koordinate zu speichern (Je Achse)
             depth = int(self.grid_coord.max() + 1).bit_length()
         self["serialized_depth"] = depth
         # Maximum bit length for serialization code is 63 (int64)
-        assert depth * 3 + len(self.offset).bit_length() <= 63
+        # Wenn wir Punkte serialisieren (z. B. für Z-Order), kodieren wir:
+        # Die 3D-Position (x, y, z) → mit depth Bits pro Achse
+        # Die Batch-ID → z. B. 0, 1, 2 für Mini-Batches
+        # → Diese Kodierung muss in einen einzigen int64-Wert passen!
+        assert depth * 3 + len(self.offset).bit_length() <= 63      #  len(self.offset).bit_length() Bits für die Batch ID
         # Here we follow OCNN and set the depth limitation to 16 (48bit) for the point position.
         # Although depth is limited to less than 16, we can encode a 655.36^3 (2^16 * 0.01) meter^3
         # cube with a grid size of 0.01 meter. We consider it is enough for the current stage.
@@ -89,8 +98,11 @@ class Point(Dict):
         code = [
             encode(self.grid_coord, self.batch, depth, order=order_) for order_ in order
         ]
+        # Stapelt mehrere 1d Tensor in einen 2d Tensor 
         code = torch.stack(code)
+        # Sortiert 2d Tensor und gibt die Indizes zurück
         order = torch.argsort(code)
+        # Rücksortierung der Indizes
         inverse = torch.zeros_like(order).scatter_(
             dim=1,
             index=order,
@@ -105,9 +117,10 @@ class Point(Dict):
             order = order[perm]
             inverse = inverse[perm]
 
-        self["serialized_code"] = code
-        self["serialized_order"] = order
-        self["serialized_inverse"] = inverse
+        self["serialized_code"]     # shape: (num_orders, num_points)
+        self["serialized_order"]    # shape: (num_orders, num_points)
+        self["serialized_inverse"]  # shape: (num_orders, num_points)
+
 
     def sparsify(self, pad=96):
         """
@@ -140,9 +153,9 @@ class Point(Dict):
             features=self.feat,
             indices=torch.cat(
                 [self.batch.unsqueeze(-1).int(), self.grid_coord.int()], dim=1
-            ).contiguous(),
-            spatial_shape=sparse_shape,
-            batch_size=self.batch[-1].tolist() + 1,
+            ).contiguous(), # Konkatiniert die Batch-ID und die Gitterkoordinaten (N, 4)
+            spatial_shape=sparse_shape, # Gittergröße
+            batch_size=self.batch[-1].tolist() + 1,    # Batch-ID ist 0-indexiert
         )
         self["sparse_shape"] = sparse_shape
         self["sparse_conv_feat"] = sparse_conv_feat

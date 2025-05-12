@@ -81,6 +81,7 @@ class DefaultDataset(Dataset):
             )
         )
 
+    # Liste mit vollständigen Pfaden zu allen Dateien über alle Splits
     def get_data_list(self):
         if isinstance(self.split, str):
             split_list = [self.split]
@@ -100,6 +101,17 @@ class DefaultDataset(Dataset):
                 data_list += glob.glob(os.path.join(self.data_root, split, "*"))
         return data_list
 
+    # Lädt eine Punktwolke als Numpy-Array und gibt sie als Dictionary zurück
+    # Beispielrückgabe:
+    # {
+    #     "coord": [N, 3] float32,
+    #     "color": [N, 3] float32,
+    #     "normal": [N, 3] float32 (optional),
+    #     "segment": [N] int32,
+    #     "instance": [N] int32,
+    #     "name": "Area_3-hallway_2",
+    #     "split": "Area_3"
+    # }
     def get_data(self, idx):
         data_path = self.data_list[idx % len(self.data_list)]
         name = self.get_data_name(idx)
@@ -154,19 +166,25 @@ class DefaultDataset(Dataset):
     def prepare_train_data(self, idx):
         # load data
         data_dict = self.get_data(idx)
+        # Fügt etwa feat hinzu: Kombination von color und Koordinaten
         data_dict = self.transform(data_dict)
         return data_dict
 
+    # Rückgabe: Szene-Metadaten + fragmentierte Punktwolkenliste für Inferenz
     def prepare_test_data(self, idx):
         # load data
         data_dict = self.get_data(idx)
+        # Fügt feat hinzu: Kombination von color und Koordinaten bei s3dis
         data_dict = self.transform(data_dict)
+        # Ergebnis groud truth Daten extrahieren
         result_dict = dict(segment=data_dict.pop("segment"), name=data_dict.pop("name"))
         if "origin_segment" in data_dict:
             assert "inverse" in data_dict
             result_dict["origin_segment"] = data_dict.pop("origin_segment")
             result_dict["inverse"] = data_dict.pop("inverse")
 
+        # Erzeugt eine Liste von Augmentierungen
+        # zB data_dict_list = [original, flipped, rotated]
         data_dict_list = []
         for aug in self.aug_transform:
             data_dict_list.append(aug(deepcopy(data_dict)))
@@ -190,6 +208,8 @@ class DefaultDataset(Dataset):
         result_dict["fragment_list"] = fragment_list
         return result_dict
 
+    # Lädt die Daten für den angegebenen Index und gibt sie zurück
+    # Wird für pytorch DataLoader verwendet
     def __getitem__(self, idx):
         if self.test_mode:
             return self.prepare_test_data(idx)

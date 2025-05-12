@@ -33,7 +33,8 @@ class PointModule(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-
+# Funktioniert so wie nn.Sequential aber interlligenter
+# Erkennt den Typ des Moduls 
 class PointSequential(PointModule):
     r"""A sequential container.
     Modules will be added to it in the order they are passed in the constructor.

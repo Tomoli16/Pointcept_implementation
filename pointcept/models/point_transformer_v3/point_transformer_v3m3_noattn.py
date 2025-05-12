@@ -111,7 +111,6 @@ class SerializedAttention(PointModule):
             point[rel_pos_key] = grid_coord.unsqueeze(2) - grid_coord.unsqueeze(1)
         return point[rel_pos_key]
 
-    # Bringt die Punktzahl jedes Punktwolken-Batches auf ein Vielfaches von patch_size
     @torch.no_grad()
     def get_padding_and_inverse(self, point):
         pad_key = "pad"
@@ -123,9 +122,7 @@ class SerializedAttention(PointModule):
             or cu_seqlens_key not in point.keys()
         ):
             offset = point.offset
-            # Anzahl der Punkte pro Batch
             bincount = offset2bincount(offset)
-            # Länge wird auf das nächste Vielfache von patch_size aufgerundet
             bincount_pad = (
                 torch.div(
                     bincount + self.patch_size - 1,
@@ -137,40 +134,25 @@ class SerializedAttention(PointModule):
             # only pad point when num of points larger than patch_size
             mask_pad = bincount > self.patch_size
             bincount_pad = ~mask_pad * bincount + mask_pad * bincount_pad
-            # Startpositionen der Batches einmal mit einmal ohne Padding
             _offset = nn.functional.pad(offset, (1, 0))
             _offset_pad = nn.functional.pad(torch.cumsum(bincount_pad, dim=0), (1, 0))
-            # Aufzählung von 1 bis zur Gesamtzahl alles gepaddeten Punkte bzw
-            # aller originalen Punkte
             pad = torch.arange(_offset_pad[-1], device=offset.device)
             unpad = torch.arange(_offset[-1], device=offset.device)
-            # Cumulative Sequence Lengths
             cu_seqlens = []
             for i in range(len(offset)):
-                # Verschiebt die Indizes der originalen Punkte auf die Position an der
-                # sie sich im gepaddeten Tensor befinden würden
-                # Eine Art forward mapping um später reverse mapping zu machen
                 unpad[_offset[i] : _offset[i + 1]] += _offset_pad[i] - _offset[i]
-                # bincount[i] Originalanzahl einer Sezene
-                # bincount_pad[i] Anzahl der gepaddeten Punkte
-
-                # Ziel: Leere Slots am Ende die durch Padding entstanden sind
-                # werden mit echten Punkten gefüllt (Kopien)
                 if bincount[i] != bincount_pad[i]:
-                    # Zielbereich, die zu füllenden Stellen
                     pad[
                         _offset_pad[i + 1]
                         - self.patch_size
                         + (bincount[i] % self.patch_size) : _offset_pad[i + 1]
-                    ] = pad[    # Quellbereich, die kopiert werden, genau die letzen Punkte aus 
-                        _offset_pad[i + 1]                      # dem letzen vollständigen Patch
+                    ] = pad[
+                        _offset_pad[i + 1]
                         - 2 * self.patch_size
                         + (bincount[i] % self.patch_size) : _offset_pad[i + 1]
                         - self.patch_size
                     ]
-                # Am Ende soll pad nur gültige Indizes enthalten, verschiebe also zurück 
                 pad[_offset_pad[i] : _offset_pad[i + 1]] -= _offset_pad[i] - _offset[i]
-                # Erzeugt pro Szene Start-Offsets für alle Patches
                 cu_seqlens.append(
                     torch.arange(
                         _offset_pad[i],
@@ -182,8 +164,6 @@ class SerializedAttention(PointModule):
                 )
             point[pad_key] = pad
             point[unpad_key] = unpad
-            # cu_seqlens = [0, 64, 128, 192, 256] (Beispiel)
-            # Genau das erwartet Flash Attention
             point[cu_seqlens_key] = nn.functional.pad(
                 torch.concat(cu_seqlens), (0, 1), value=_offset_pad[-1]
             )
@@ -191,8 +171,6 @@ class SerializedAttention(PointModule):
 
     def forward(self, point):
         if not self.enable_flash:
-            # Wähle Patchsize so, dass sie nicht größer ist als das kleinste Batch
-            # und nicht größer als die maximale Patchgröße
             self.patch_size = min(
                 offset2bincount(point.offset).min().tolist(), self.patch_size_max
             )
@@ -203,15 +181,10 @@ class SerializedAttention(PointModule):
 
         pad, unpad, cu_seqlens = self.get_padding_and_inverse(point)
 
-        # Die Positionen der (gepadde­ten und ggf. duplizierten) Punkte, 
-        # aber sortiert nach der gewünschten Reihenfolge (z. B. Z-Order, Hilbert etc.)
-        # Länge N_padded
         order = point.serialized_order[self.order_index][pad]
         inverse = unpad[point.serialized_inverse[self.order_index]]
 
         # padding and reshape feat and batch for serialized point patch
-        # feat: (N, C) -> (N_padded, C*3) Linear Layer
-        # Wandelt Features in QKV um (linear Layer) und sortiert sie anschließend
         qkv = self.qkv(point.feat)[order]
 
         if not self.enable_flash:
@@ -233,20 +206,13 @@ class SerializedAttention(PointModule):
             feat = (attn @ v).transpose(1, 2).reshape(-1, C)
         else:
             feat = flash_attn.flash_attn_varlen_qkvpacked_func(
-                # Macht aus einem flachen, aneinander gereihten Q, K, V Vektor (Je Token)
-                # eine strukturierte Darstellung die getrennte Q, K, V Matrizen enthält,
-                # in Heads aufgeteilt ist als float16 vorliegt
-                # [N', C*3] -> [N', 3, H, C//H]
                 qkv.half().reshape(-1, 3, H, C // H),
                 cu_seqlens,
                 max_seqlen=self.patch_size,
                 dropout_p=self.attn_drop if self.training else 0,
                 softmax_scale=self.scale,
-            ).reshape(-1, C)    # Wandelt wieder in flachen Vektor um [num_points, C]
-            # Rechnet zurück zu float32
+            ).reshape(-1, C)
             feat = feat.to(qkv.dtype)
-        # Punkte werden in original Reihenfolge zurücksortiert
-        # feat: (N', C) -> (N, C)
         feat = feat[inverse]
 
         # ffn
@@ -372,18 +338,14 @@ class Block(PointModule):
         self.channels = channels
         self.pre_norm = pre_norm
 
-        # Convolutional Position Encoding
-        # Reichert Punktfeatures mit lokalem Kontext an
-        # Berücksichtigt räumliche Struktur
         self.cpe = PointSequential(
             spconv.SubMConv3d(
-                channels,       # in channels
-                channels,       # out channels
+                channels,
+                channels,
                 kernel_size=3,
                 bias=True,
                 indice_key=cpe_indice_key,
             ),
-            # positionssensitiv, weil das Input-Feature schon lokalen Kontext enthält
             nn.Linear(channels, channels),
             norm_layer(channels),
         )
@@ -413,8 +375,6 @@ class Block(PointModule):
                 drop=proj_drop,
             )
         )
-        # Eine Art Dropout aber nicht auf einzelne Neuronen
-        # sondern auf ganze Pfade
         self.drop_path = PointSequential(
             DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         )
@@ -426,7 +386,6 @@ class Block(PointModule):
         shortcut = point.feat
         if self.pre_norm:
             point = self.norm1(point)
-        # Entscheidet ob Ergebnis von Attention oder 0 genutzt wird
         point = self.drop_path(self.attn(point))
         point.feat = shortcut + point.feat
         if not self.pre_norm:
@@ -459,7 +418,6 @@ class SerializedPooling(PointModule):
         self.in_channels = in_channels
         self.out_channels = out_channels
 
-        # Prüft ob stride eine Potenz von 2 ist
         assert stride == 2 ** (math.ceil(stride) - 1).bit_length()  # 2, 4, 8
         # TODO: add support to grid pool (any stride)
         self.stride = stride
@@ -475,7 +433,6 @@ class SerializedPooling(PointModule):
             self.act = PointSequential(act_layer())
 
     def forward(self, point: Point):
-        # Bestimmt wie viele Bit-Ebenen nach oben gegangen werden soll
         pooling_depth = (math.ceil(self.stride) - 1).bit_length()
         if pooling_depth > point.serialized_depth:
             pooling_depth = 0
@@ -488,14 +445,7 @@ class SerializedPooling(PointModule):
             point.keys()
         ), "Run point.serialization() point cloud before SerializedPooling"
 
-        # Schneidet die letzten (feinsten) pooling_depth * 3 Bits ab
-        # Das Bit-Shift in code = point.serialized_code >> (pooling_depth * 3) 
-        # dient dazu, die Punktwolke auf einer gröberen Auflösung zu betrachten – 
-        # also die Punkte in größere "Voxel-Cluster" zu gruppieren
         code = point.serialized_code >> pooling_depth * 3
-        # Gibt unique codes
-        # Für jeden Index Clusterzugehörigkeit
-        # und Anzahl der Punkte in jedem Cluster
         code_, cluster, counts = torch.unique(
             code[0],
             sorted=True,
@@ -505,17 +455,11 @@ class SerializedPooling(PointModule):
         # indices of point sorted by cluster, for torch_scatter.segment_csr
         _, indices = torch.sort(cluster)
         # index pointer for sorted point, for torch_scatter.segment_csr
-        # cumsum gibt jeweils die Endindizes der Cluster an (Nicht inklusive)
-        # Vorne wird noch 0 hinzugefügt
         idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)])
         # head_indices of each cluster, for reduce attr e.g. code, batch
-        # head_indices enthält jeweils den ersten Index jedes Clusters im sortierten Punkt-Array
         head_indices = indices[idx_ptr[:-1]]
         # generate down code, order, inverse
-        # rediziert Code auf die repräsentativen Punkte
-        # [num_orders, num_points] -> [num_orders, num_clusters]
         code = code[:, head_indices]
-        # Sortiert nach Code
         order = torch.argsort(code)
         inverse = torch.zeros_like(order).scatter_(
             dim=1,
@@ -533,11 +477,6 @@ class SerializedPooling(PointModule):
 
         # collect information
         point_dict = Dict(
-            # Hier passiert das Pooling
-            # feat bekommt durch Linear proj mehr channels
-            # Dann wird nach indices sortiert
-            # idx_ptr gibt dann Clusterabschnitte an
-            # torch reduziert dann
             feat=torch_scatter.segment_csr(
                 self.proj(point.feat)[indices], idx_ptr, reduce=self.reduce
             ),
@@ -620,16 +559,11 @@ class Embedding(PointModule):
         self.embed_channels = embed_channels
 
         # TODO: check remove spconv
-        # PointSequential ist ein Container sowie nn.Sequential, nur für Punktwolken
         self.stem = PointSequential(
-            # SubMConv3d ist eine 3D-Convolution, die Sparse Convolution verwendet
-            # Submanifold Convolution, d.h. Output Koordinaten sind die gleichen wie Input Koordinaten
-            # und die Anzahl der Kanäle wird geändert
-            # Conv wird also mit jedem Punkt als Zentrum durchgeführt
             conv=spconv.SubMConv3d(
                 in_channels,
                 embed_channels,
-                kernel_size=5,  # 5x5x5 Kernel
+                kernel_size=5,
                 padding=1,
                 bias=False,
                 indice_key="stem",
@@ -645,7 +579,7 @@ class Embedding(PointModule):
         return point
 
 
-@MODELS.register_module("PT-v3m1")
+@MODELS.register_module("PT-v3m3")
 class PointTransformerV3(PointModule):
     def __init__(
         self,
@@ -729,7 +663,7 @@ class PointTransformerV3(PointModule):
             act_layer=act_layer,
         )
 
-        # encoder wird im Konstruktor gebaut
+        # encoder
         enc_drop_path = [
             x.item() for x in torch.linspace(0, drop_path, sum(enc_depths))
         ]
@@ -741,7 +675,6 @@ class PointTransformerV3(PointModule):
             enc = PointSequential()
             if s > 0:
                 enc.add(
-                    # Num Points sinkt aber channels steigen
                     SerializedPooling(
                         in_channels=enc_channels[s - 1],
                         out_channels=enc_channels[s],
@@ -779,7 +712,6 @@ class PointTransformerV3(PointModule):
                 self.enc.add(module=enc, name=f"enc{s}")
 
         # decoder
-        # Nur wenn wir nicht im klassifizierungsmodus sind, sonst reicht latente Repräsentation
         if not self.cls_mode:
             dec_drop_path = [
                 x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))
@@ -828,14 +760,9 @@ class PointTransformerV3(PointModule):
                     )
                 self.dec.add(module=dec, name=f"dec{s}")
 
-    # bekommt batch
     def forward(self, data_dict):
-        # Erstellt addict Dict 
         point = Point(data_dict)
-        # Fügt zu Point Objekt serialization code, order und inverse hinzu
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
-        # Fügt sparse_shape und sparse_conv_feat hinzu für SpConv
-        # "Du kannst diesen Tensor nun direkt in ein Layer wie spconv.SubMConv3d(...) einspeisen"
         point.sparsify()
 
         point = self.embedding(point)

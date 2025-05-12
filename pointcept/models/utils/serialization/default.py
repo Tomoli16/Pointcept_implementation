@@ -18,6 +18,7 @@ def encode(grid_coord, batch=None, depth=16, order="z"):
         code = hilbert_encode(grid_coord[:, [1, 0, 2]], depth=depth)
     else:
         raise NotImplementedError
+    # Trailing k bits are used for batch index
     if batch is not None:
         batch = batch.long()
         code = batch << depth * 3 | code

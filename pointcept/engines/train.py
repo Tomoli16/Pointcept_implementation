@@ -170,6 +170,8 @@ class Trainer(TrainerBase):
                 self.data_iterator = enumerate(self.train_loader)
                 self.before_epoch()
                 # => run_epoch
+                # for idx, batch in enumerate(self.train_loader):
+                # Batch für Batch
                 for (
                     self.comm_info["iter"],
                     self.comm_info["input_dict"],
@@ -192,15 +194,17 @@ class Trainer(TrainerBase):
             # deprecated warning
             auto_cast = torch.cuda.amp.autocast
 
+        # move data to GPU
         input_dict = self.comm_info["input_dict"]
         for key in input_dict.keys():
             if isinstance(input_dict[key], torch.Tensor):
                 input_dict[key] = input_dict[key].cuda(non_blocking=True)
 
+        # forward pass
         with auto_cast(
             enabled=self.cfg.enable_amp, dtype=AMP_DTYPE[self.cfg.amp_dtype]
         ):
-            output_dict = self.model(input_dict)
+            output_dict = self.model(input_dict)    #magic function, führt model.forward aus
             loss = output_dict["loss"]
         self.optimizer.zero_grad()
         if self.cfg.enable_amp:
@@ -237,6 +241,8 @@ class Trainer(TrainerBase):
         if self.cfg.empty_cache_per_epoch:
             torch.cuda.empty_cache()
 
+
+    # Initialisiert Modell vollständig über registry und lädt es auf die GPU
     def build_model(self):
         model = build_model(self.cfg.model)
         if self.cfg.sync_bn:
@@ -267,8 +273,10 @@ class Trainer(TrainerBase):
         return writer
 
     def build_train_loader(self):
+        # Erstellt Dataset Klasse die data_list mit den Pfaden der Daten enthält
         train_data = build_dataset(self.cfg.data.train)
 
+        # Für Parallelisierung etc.
         if comm.get_world_size() > 1:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_data)
         else:
