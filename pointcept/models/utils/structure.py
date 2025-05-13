@@ -117,9 +117,9 @@ class Point(Dict):
             order = order[perm]
             inverse = inverse[perm]
 
-        self["serialized_code"]     # shape: (num_orders, num_points)
-        self["serialized_order"]    # shape: (num_orders, num_points)
-        self["serialized_inverse"]  # shape: (num_orders, num_points)
+        self["serialized_code"] = code    # shape: (num_orders, num_points)
+        self["serialized_order"] = order   # shape: (num_orders, num_points)
+        self["serialized_inverse"] = inverse # shape: (num_orders, num_points)
 
 
     def sparsify(self, pad=96):
