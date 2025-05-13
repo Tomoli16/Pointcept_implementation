@@ -254,6 +254,113 @@ class SerializedAttention(PointModule):
         feat = self.proj_drop(feat)
         point.feat = feat
         return point
+    
+class MambaSerialized(PointModule):
+    def __init__(self, channels, patch_size, order_index, proj_drop=0.0):
+        super().__init__()
+        self.channels = channels
+        self.patch_size = patch_size
+        self.order_index = order_index
+        self.norm = nn.LayerNorm(channels)
+        self.mamba = Mamba(d_model=channels)
+        self.proj = nn.Linear(channels, channels)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    @torch.no_grad()
+    def get_padding_and_inverse(self, point):
+        pad_key = "pad"
+        unpad_key = "unpad"
+        cu_seqlens_key = "cu_seqlens_key"
+        if (
+            pad_key not in point.keys()
+            or unpad_key not in point.keys()
+            or cu_seqlens_key not in point.keys()
+        ):
+            offset = point.offset
+            # Anzahl der Punkte pro Batch
+            bincount = offset2bincount(offset)
+            # Länge wird auf das nächste Vielfache von patch_size aufgerundet
+            bincount_pad = (
+                torch.div(
+                    bincount + self.patch_size - 1,
+                    self.patch_size,
+                    rounding_mode="trunc",
+                )
+                * self.patch_size
+            )
+            # only pad point when num of points larger than patch_size
+            mask_pad = bincount > self.patch_size
+            bincount_pad = ~mask_pad * bincount + mask_pad * bincount_pad
+            # Startpositionen der Batches einmal mit einmal ohne Padding
+            _offset = nn.functional.pad(offset, (1, 0))
+            _offset_pad = nn.functional.pad(torch.cumsum(bincount_pad, dim=0), (1, 0))
+            # Aufzählung von 1 bis zur Gesamtzahl alles gepaddeten Punkte bzw
+            # aller originalen Punkte
+            pad = torch.arange(_offset_pad[-1], device=offset.device)
+            unpad = torch.arange(_offset[-1], device=offset.device)
+            # Cumulative Sequence Lengths
+            cu_seqlens = []
+            for i in range(len(offset)):
+                # Verschiebt die Indizes der originalen Punkte auf die Position an der
+                # sie sich im gepaddeten Tensor befinden würden
+                # Eine Art forward mapping um später reverse mapping zu machen
+                unpad[_offset[i] : _offset[i + 1]] += _offset_pad[i] - _offset[i]
+                # bincount[i] Originalanzahl einer Sezene
+                # bincount_pad[i] Anzahl der gepaddeten Punkte
+
+                # Ziel: Leere Slots am Ende die durch Padding entstanden sind
+                # werden mit echten Punkten gefüllt (Kopien)
+                if bincount[i] != bincount_pad[i]:
+                    # Zielbereich, die zu füllenden Stellen
+                    pad[
+                        _offset_pad[i + 1]
+                        - self.patch_size
+                        + (bincount[i] % self.patch_size) : _offset_pad[i + 1]
+                    ] = pad[    # Quellbereich, die kopiert werden, genau die letzen Punkte aus 
+                        _offset_pad[i + 1]                      # dem letzen vollständigen Patch
+                        - 2 * self.patch_size
+                        + (bincount[i] % self.patch_size) : _offset_pad[i + 1]
+                        - self.patch_size
+                    ]
+                # Am Ende soll pad nur gültige Indizes enthalten, verschiebe also zurück 
+                pad[_offset_pad[i] : _offset_pad[i + 1]] -= _offset_pad[i] - _offset[i]
+                # Erzeugt pro Szene Start-Offsets für alle Patches
+                cu_seqlens.append(
+                    torch.arange(
+                        _offset_pad[i],
+                        _offset_pad[i + 1],
+                        step=self.patch_size,
+                        dtype=torch.int32,
+                        device=offset.device,
+                    )
+                )
+            point[pad_key] = pad
+            point[unpad_key] = unpad
+            # cu_seqlens = [0, 64, 128, 192, 256] (Beispiel)
+            # Genau das erwartet Flash Attention
+            point[cu_seqlens_key] = nn.functional.pad(
+                torch.concat(cu_seqlens), (0, 1), value=_offset_pad[-1]
+            )
+        return point[pad_key], point[unpad_key], point[cu_seqlens_key]
+
+    def forward(self, point):
+
+
+        pad, unpad, cu_seqlens = self.get_padding_and_inverse(point)
+        order = point.serialized_order[self.order_index][pad]
+        inverse = unpad[point.serialized_inverse[self.order_index]]
+
+        feat = point.feat[order]  # (N_padded, C)
+        feat = feat.reshape(-1, self.patch_size, self.channels)  # [B, K, C]
+        feat = self.norm(feat)
+        feat = self.mamba(feat)  # MambaBlock läuft komplett in Python
+        feat = feat.reshape(-1, self.channels)[inverse]  # [N, C]
+
+        feat = self.proj(feat)
+        feat = self.proj_drop(feat)
+        point.feat = feat
+        return point
+
 
 
 class MLP(nn.Module):
@@ -441,6 +548,87 @@ class Block(PointModule):
             point = self.norm2(point)
         point.sparse_conv_feat = point.sparse_conv_feat.replace_feature(point.feat)
         return point
+    
+
+class MambaBlock(PointModule):
+    def __init__(
+        self,
+        channels,
+        patch_size=48,
+        mlp_ratio=4.0,
+        proj_drop=0.0,
+        drop_path=0.0,
+        norm_layer=nn.LayerNorm,
+        act_layer=nn.GELU,
+        pre_norm=True,
+        order_index=0,
+        cpe_indice_key=None,
+        enable_rpe=False,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.pre_norm = pre_norm
+
+        self.cpe = PointSequential(
+            spconv.SubMConv3d(
+                channels,       # in channels
+                channels,       # out channels
+                kernel_size=3,
+                bias=True,
+                indice_key=cpe_indice_key,
+            ),
+            # positionssensitiv, weil das Input-Feature schon lokalen Kontext enthält
+            nn.Linear(channels, channels),
+            norm_layer(channels),
+        )
+
+        self.norm1 = PointSequential(norm_layer(channels))
+        self.mamba = MambaSerialized(
+            channels=channels,
+            patch_size=patch_size,
+            order_index=order_index,
+            proj_drop=proj_drop,
+        )
+        self.norm2 = PointSequential(norm_layer(channels))
+        self.mlp = PointSequential(
+            MLP(
+                in_channels=channels,
+                hidden_channels=int(channels * mlp_ratio),
+                out_channels=channels,
+                act_layer=act_layer,
+                drop=proj_drop,
+            )
+        )
+
+        self.drop_path = PointSequential(
+            DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        )
+
+    def forward(self, point: Point):
+        shortcut = point.feat
+        point = self.cpe(point)
+        point.feat = shortcut + point.feat
+        shortcut = point.feat
+        if self.pre_norm:
+            point = self.norm1(point)
+        # Entscheidet ob Ergebnis von Attention oder 0 genutzt wird
+        # point = self.drop_path(self.mamba(point))
+        point = self.mamba(point)
+        point.feat = shortcut + point.feat
+        if not self.pre_norm:
+            point = self.norm1(point)
+
+        shortcut = point.feat
+        if self.pre_norm:
+            point = self.norm2(point)
+        point = self.drop_path(self.mlp(point))
+        point.feat = shortcut + point.feat
+        if not self.pre_norm:
+            point = self.norm2(point)
+        point.sparse_conv_feat = point.sparse_conv_feat.replace_feature(point.feat)
+        return point
+
+
 
 
 class SerializedPooling(PointModule):
@@ -752,6 +940,21 @@ class PointTransformerV3(PointModule):
                     name="down",
                 )
             for i in range(enc_depths[s]):
+                # enc.add(
+                #     MambaBlock(
+                #         channels=enc_channels[s],
+                #         patch_size=enc_patch_size[s],
+                #         mlp_ratio=mlp_ratio,
+                #         proj_drop=proj_drop,
+                #         drop_path=enc_drop_path_[i],
+                #         norm_layer=ln_layer,
+                #         act_layer=act_layer,
+                #         pre_norm=pre_norm,
+                #         order_index=i % len(self.order),
+                #         cpe_indice_key=f"stage{s}",
+                #     ),
+                #     name=f"block{i}",
+                # )
                 enc.add(
                     Block(
                         channels=enc_channels[s],
@@ -803,6 +1006,21 @@ class PointTransformerV3(PointModule):
                     name="up",
                 )
                 for i in range(dec_depths[s]):
+                    # dec.add(
+                    #     MambaBlock(
+                    #         channels=dec_channels[s],
+                    #         patch_size=dec_patch_size[s],
+                    #         mlp_ratio=mlp_ratio,
+                    #         proj_drop=proj_drop,
+                    #         drop_path=dec_drop_path_[i],
+                    #         norm_layer=ln_layer,
+                    #         act_layer=act_layer,
+                    #         pre_norm=pre_norm,
+                    #         order_index=i % len(self.order),
+                    #         cpe_indice_key=f"stage{s}",
+                    #     ),
+                    #     name=f"block{i}",
+                    # )
                     dec.add(
                         Block(
                             channels=dec_channels[s],
