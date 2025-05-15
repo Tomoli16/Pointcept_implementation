@@ -25,6 +25,14 @@ from pointcept.models.utils.misc import offset2bincount
 from pointcept.models.utils.structure import Point
 from pointcept.models.modules import PointModule, PointSequential
 
+import sys
+import os
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "modules", "mamba"))
+
+from mamba_ssm.modules.mamba_simple import Mamba  # oder was du brauchst
+
+
 
 class RPE(torch.nn.Module):
     def __init__(self, patch_size, num_heads):
@@ -265,6 +273,7 @@ class MambaSerialized(PointModule):
         self.mamba = Mamba(d_model=channels)
         self.proj = nn.Linear(channels, channels)
         self.proj_drop = nn.Dropout(proj_drop)
+        self.patch_size_max = patch_size
 
     @torch.no_grad()
     def get_padding_and_inverse(self, point):
@@ -345,12 +354,17 @@ class MambaSerialized(PointModule):
 
     def forward(self, point):
 
-
+        self.patch_size = min(
+                offset2bincount(point.offset).min().tolist(), self.patch_size_max
+            )
         pad, unpad, cu_seqlens = self.get_padding_and_inverse(point)
         order = point.serialized_order[self.order_index][pad]
         inverse = unpad[point.serialized_inverse[self.order_index]]
-
+        # print("Feat shape before:", point.feat.shape)
+        # print("Padding shape", pad.shape)
         feat = point.feat[order]  # (N_padded, C)
+        # print("order.shape:", order.shape)
+        # print("point.feat.shape:", feat.shape)
         feat = feat.reshape(-1, self.patch_size, self.channels)  # [B, K, C]
         feat = self.norm(feat)
         feat = self.mamba(feat)  # MambaBlock läuft komplett in Python
@@ -940,6 +954,16 @@ class PointTransformerV3(PointModule):
                     name="down",
                 )
             for i in range(enc_depths[s]):
+                enc.add(
+                    simpleBlockConv(
+                        channels=enc_channels[s],
+                        norm_layer=ln_layer,
+                        mlp_ratio=mlp_ratio,
+                        act_layer=act_layer,
+                        pre_norm=pre_norm,
+                    ),
+                    name=f"block{i}",
+                )
                 # enc.add(
                 #     MambaBlock(
                 #         channels=enc_channels[s],
@@ -955,29 +979,29 @@ class PointTransformerV3(PointModule):
                 #     ),
                 #     name=f"block{i}",
                 # )
-                enc.add(
-                    Block(
-                        channels=enc_channels[s],
-                        num_heads=enc_num_head[s],
-                        patch_size=enc_patch_size[s],
-                        mlp_ratio=mlp_ratio,
-                        qkv_bias=qkv_bias,
-                        qk_scale=qk_scale,
-                        attn_drop=attn_drop,
-                        proj_drop=proj_drop,
-                        drop_path=enc_drop_path_[i],
-                        norm_layer=ln_layer,
-                        act_layer=act_layer,
-                        pre_norm=pre_norm,
-                        order_index=i % len(self.order),
-                        cpe_indice_key=f"stage{s}",
-                        enable_rpe=enable_rpe,
-                        enable_flash=enable_flash,
-                        upcast_attention=upcast_attention,
-                        upcast_softmax=upcast_softmax,
-                    ),
-                    name=f"block{i}",
-                )
+                # enc.add(
+                #     Block(
+                #         channels=enc_channels[s],
+                #         num_heads=enc_num_head[s],
+                #         patch_size=enc_patch_size[s],
+                #         mlp_ratio=mlp_ratio,
+                #         qkv_bias=qkv_bias,
+                #         qk_scale=qk_scale,
+                #         attn_drop=attn_drop,
+                #         proj_drop=proj_drop,
+                #         drop_path=enc_drop_path_[i],
+                #         norm_layer=ln_layer,
+                #         act_layer=act_layer,
+                #         pre_norm=pre_norm,
+                #         order_index=i % len(self.order),
+                #         cpe_indice_key=f"stage{s}",
+                #         enable_rpe=enable_rpe,
+                #         enable_flash=enable_flash,
+                #         upcast_attention=upcast_attention,
+                #         upcast_softmax=upcast_softmax,
+                #     ),
+                #     name=f"block{i}",
+                # )
             if len(enc) != 0:
                 self.enc.add(module=enc, name=f"enc{s}")
 
@@ -1006,6 +1030,16 @@ class PointTransformerV3(PointModule):
                     name="up",
                 )
                 for i in range(dec_depths[s]):
+                    dec.add(
+                        simpleBlockConv(
+                            channels=dec_channels[s],
+                            norm_layer=ln_layer,
+                            mlp_ratio=mlp_ratio,
+                            act_layer=act_layer,
+                            pre_norm=pre_norm,
+                        ),
+                        name=f"block{i}",
+                    )
                     # dec.add(
                     #     MambaBlock(
                     #         channels=dec_channels[s],
@@ -1021,29 +1055,29 @@ class PointTransformerV3(PointModule):
                     #     ),
                     #     name=f"block{i}",
                     # )
-                    dec.add(
-                        Block(
-                            channels=dec_channels[s],
-                            num_heads=dec_num_head[s],
-                            patch_size=dec_patch_size[s],
-                            mlp_ratio=mlp_ratio,
-                            qkv_bias=qkv_bias,
-                            qk_scale=qk_scale,
-                            attn_drop=attn_drop,
-                            proj_drop=proj_drop,
-                            drop_path=dec_drop_path_[i],
-                            norm_layer=ln_layer,
-                            act_layer=act_layer,
-                            pre_norm=pre_norm,
-                            order_index=i % len(self.order),
-                            cpe_indice_key=f"stage{s}",
-                            enable_rpe=enable_rpe,
-                            enable_flash=enable_flash,
-                            upcast_attention=upcast_attention,
-                            upcast_softmax=upcast_softmax,
-                        ),
-                        name=f"block{i}",
-                    )
+                    # dec.add(
+                    #     Block(
+                    #         channels=dec_channels[s],
+                    #         num_heads=dec_num_head[s],
+                    #         patch_size=dec_patch_size[s],
+                    #         mlp_ratio=mlp_ratio,
+                    #         qkv_bias=qkv_bias,
+                    #         qk_scale=qk_scale,
+                    #         attn_drop=attn_drop,
+                    #         proj_drop=proj_drop,
+                    #         drop_path=dec_drop_path_[i],
+                    #         norm_layer=ln_layer,
+                    #         act_layer=act_layer,
+                    #         pre_norm=pre_norm,
+                    #         order_index=i % len(self.order),
+                    #         cpe_indice_key=f"stage{s}",
+                    #         enable_rpe=enable_rpe,
+                    #         enable_flash=enable_flash,
+                    #         upcast_attention=upcast_attention,
+                    #         upcast_softmax=upcast_softmax,
+                    #     ),
+                    #     name=f"block{i}",
+                    # )
                 self.dec.add(module=dec, name=f"dec{s}")
 
     # bekommt batch
