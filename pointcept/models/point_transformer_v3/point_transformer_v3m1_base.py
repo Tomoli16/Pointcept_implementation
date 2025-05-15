@@ -32,7 +32,12 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "modules", "mamba"))
 
 from mamba_ssm.modules.mamba_simple import Mamba  # oder was du brauchst
 
+from enum import Enum
 
+class BlockType(str, Enum):
+    CONV = "conv"
+    MAMBA = "mamba"
+    ATTENTION = "attention"
 
 class RPE(torch.nn.Module):
     def __init__(self, patch_size, num_heads):
@@ -881,12 +886,14 @@ class PointTransformerV3(PointModule):
         pdnorm_adaptive=False,
         pdnorm_affine=True,
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
+        block_type="attention",
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
         self.order = [order] if isinstance(order, str) else order
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders
+        self.block_type = block_type
 
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
@@ -954,16 +961,73 @@ class PointTransformerV3(PointModule):
                     name="down",
                 )
             for i in range(enc_depths[s]):
-                enc.add(
-                    simpleBlockConv(
-                        channels=enc_channels[s],
-                        norm_layer=ln_layer,
-                        mlp_ratio=mlp_ratio,
-                        act_layer=act_layer,
-                        pre_norm=pre_norm,
-                    ),
-                    name=f"block{i}",
-                )
+                name = f"block{i}"
+                if block_type == BlockType.CONV:
+                    enc.add(
+                        simpleBlockConv(
+                            channels=enc_channels[s],
+                            norm_layer=ln_layer,
+                            mlp_ratio=mlp_ratio,
+                            act_layer=act_layer,
+                            pre_norm=pre_norm,
+                        ),
+                        name=name,
+                    )
+                elif block_type == BlockType.MAMBA:
+                    enc.add(
+                        MambaBlock(
+                            channels=enc_channels[s],
+                            patch_size=enc_patch_size[s],
+                            mlp_ratio=mlp_ratio,
+                            proj_drop=proj_drop,
+                            drop_path=enc_drop_path_[i],
+                            norm_layer=ln_layer,
+                            act_layer=act_layer,
+                            pre_norm=pre_norm,
+                            order_index=i % len(self.order),
+                            cpe_indice_key=f"stage{s}",
+                        ),
+                        name=name,
+                    )
+                elif block_type == BlockType.ATTENTION:
+                    enc.add(
+                        Block(
+                            channels=enc_channels[s],
+                            num_heads=enc_num_head[s],
+                            patch_size=enc_patch_size[s],
+                            mlp_ratio=mlp_ratio,
+                            qkv_bias=qkv_bias,
+                            qk_scale=qk_scale,
+                            attn_drop=attn_drop,
+                            proj_drop=proj_drop,
+                            drop_path=enc_drop_path_[i],
+                            norm_layer=ln_layer,
+                            act_layer=act_layer,
+                            pre_norm=pre_norm,
+                            order_index=i % len(self.order),
+                            cpe_indice_key=f"stage{s}",
+                            enable_rpe=enable_rpe,
+                            enable_flash=enable_flash,
+                            upcast_attention=upcast_attention,
+                            upcast_softmax=upcast_softmax,
+                        ),
+                        name=name,
+                    )
+                else:
+                    raise ValueError(f"Unknown block type: {block_type}")
+            
+            # for i in range(enc_depths[s]):
+                
+            #     enc.add(
+            #         simpleBlockConv(
+            #             channels=enc_channels[s],
+            #             norm_layer=ln_layer,
+            #             mlp_ratio=mlp_ratio,
+            #             act_layer=act_layer,
+            #             pre_norm=pre_norm,
+            #         ),
+            #         name=f"block{i}",
+            #     )
                 # enc.add(
                 #     MambaBlock(
                 #         channels=enc_channels[s],
@@ -1029,17 +1093,74 @@ class PointTransformerV3(PointModule):
                     ),
                     name="up",
                 )
+
                 for i in range(dec_depths[s]):
-                    dec.add(
-                        simpleBlockConv(
-                            channels=dec_channels[s],
-                            norm_layer=ln_layer,
-                            mlp_ratio=mlp_ratio,
-                            act_layer=act_layer,
-                            pre_norm=pre_norm,
-                        ),
-                        name=f"block{i}",
-                    )
+                    name = f"block{i}"
+                    if self.block_type == BlockType.CONV:
+                        dec.add(
+                            simpleBlockConv(
+                                channels=dec_channels[s],
+                                norm_layer=ln_layer,
+                                mlp_ratio=mlp_ratio,
+                                act_layer=act_layer,
+                                pre_norm=pre_norm,
+                            ),
+                            name=name,
+                        )
+                    elif self.block_type == BlockType.MAMBA:
+                        dec.add(
+                            MambaBlock(
+                                channels=dec_channels[s],
+                                patch_size=dec_patch_size[s],
+                                mlp_ratio=mlp_ratio,
+                                proj_drop=proj_drop,
+                                drop_path=dec_drop_path_[i],
+                                norm_layer=ln_layer,
+                                act_layer=act_layer,
+                                pre_norm=pre_norm,
+                                order_index=i % len(self.order),
+                                cpe_indice_key=f"stage{s}",
+                            ),
+                            name=name,
+                        )
+                    elif self.block_type == BlockType.ATTENTION:
+                        dec.add(
+                            Block(
+                                channels=dec_channels[s],
+                                num_heads=dec_num_head[s],
+                                patch_size=dec_patch_size[s],
+                                mlp_ratio=mlp_ratio,
+                                qkv_bias=qkv_bias,
+                                qk_scale=qk_scale,
+                                attn_drop=attn_drop,
+                                proj_drop=proj_drop,
+                                drop_path=dec_drop_path_[i],
+                                norm_layer=ln_layer,
+                                act_layer=act_layer,
+                                pre_norm=pre_norm,
+                                order_index=i % len(self.order),
+                                cpe_indice_key=f"stage{s}",
+                                enable_rpe=enable_rpe,
+                                enable_flash=enable_flash,
+                                upcast_attention=upcast_attention,
+                                upcast_softmax=upcast_softmax,
+                            ),
+                            name=name,
+                        )
+                    else:
+                        raise ValueError(f"Unknown block type: {self.block_type}")
+
+                # for i in range(dec_depths[s]):
+                #     dec.add(
+                #         simpleBlockConv(
+                #             channels=dec_channels[s],
+                #             norm_layer=ln_layer,
+                #             mlp_ratio=mlp_ratio,
+                #             act_layer=act_layer,
+                #             pre_norm=pre_norm,
+                #         ),
+                #         name=f"block{i}",
+                #     )
                     # dec.add(
                     #     MambaBlock(
                     #         channels=dec_channels[s],

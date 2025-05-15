@@ -1,7 +1,7 @@
 _base_ = ["../_base_/default_runtime.py"]
 
 # misc custom setting
-batch_size = 36  # bs: total bs in all gpus
+batch_size = 16  # bs: total bs in all gpus
 num_worker = 24
 mix_prob = 0.8
 empty_cache = False
@@ -45,6 +45,7 @@ model = dict(
         pdnorm_adaptive=False,
         pdnorm_affine=True,
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
+        block_type="mamba",
     ),
     criteria=[
         dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),
@@ -53,8 +54,8 @@ model = dict(
 )
 
 # scheduler settings
-epoch = 900
-eval_epoch = 30
+epoch = 3000
+eval_epoch = 100
 optimizer = dict(type="AdamW", lr=0.006, weight_decay=0.05)
 scheduler = dict(
     type="OneCycleLR",
